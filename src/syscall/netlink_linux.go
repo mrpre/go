@@ -176,3 +176,63 @@ func netlinkRouteAttrAndValue(b []byte) (*RtAttr, []byte, int, error) {
 	}
 	return a, b[SizeofRtAttr:], rtaAlignOf(int(a.Len)), nil
 }
+
+func netlinkRecv(fd int, rb []byte, flags int) (int, error) {
+	for {
+		len, _, err := Recvfrom(fd, rb, flags)
+		if len < 0 && err == EAGAIN {
+			continue
+		}
+		if len < 0 {
+			return len, err
+		}
+		if len == 0 {
+			return 0, ENODATA
+		}
+		return len, nil
+	}
+}
+
+// Receive common netlink messages, stop if NLMSG_DONE is received
+func NetlinkRecvMsg(fd int, cb func([]NetlinkMessage)) error {
+	var msgs []NetlinkMessage
+	var doneFound = false
+	for {
+		var rb []byte
+		// MSG_TRUNC tell the kernel to return true data size
+		// nr should be the first skb size in recvive queue
+		nr, err := netlinkRecv(fd, rb, MSG_PEEK|MSG_TRUNC)
+		if err != nil {
+			return err
+		}
+		if nr == 0 {
+			break
+		}
+		rb = make([]byte, nr)
+		nr, err = netlinkRecv(fd, rb, 0)
+		if err != nil {
+			return err
+		}
+		rb = rb[:nr]
+		// a copy of ParseNetlinkMessage but with NLMSG_DONE parsed
+		for len(rb) >= NLMSG_HDRLEN {
+			h, dbuf, dlen, err := netlinkMessageHeaderAndData(rb)
+			if err != nil {
+				return err
+			}
+			if h.Type == NLMSG_DONE {
+				doneFound = true
+			}
+			m := NetlinkMessage{Header: *h, Data: dbuf[:int(h.Len)-NLMSG_HDRLEN]}
+			msgs = append(msgs, m)
+			rb = rb[dlen:]
+		}
+		if cb != nil {
+			cb(msgs)
+		}
+		if doneFound {
+			return nil
+		}
+	}
+	return nil
+}
